@@ -6,7 +6,7 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense, Dropout
 from tensorflow.keras.callbacks import EarlyStopping
 import tensorflow as tf
-import joblib   # for saving the scaler
+import joblib
 
 # ==========================================================
 # GPU CHECK
@@ -26,63 +26,63 @@ else:
 # SETTINGS
 # ==========================================================
 CSV_FILE = "/mnt/data/BBL_BK_OHLCV_2019-2025.csv"
-SEQ_LEN = 5                     # use past 5 days
+SEQ_LEN = 5
 MODEL_NAME = "lstm_bbl_5days.h5"
-SCALER_NAME = "bbl_scaler.save"  # joblib file
+SCALER_NAME = "bbl_scaler.save"
 
 # ==========================================================
-# 1. LOAD DATA
+# 1. LOAD & CLEAN DATA (TRAIN ONLY 2019–2023)
 # ==========================================================
 def load_data():
     print("Loading dataset:", CSV_FILE)
     df = pd.read_csv(CSV_FILE)
 
-    # --- handle the dataset's "junk" first row (e.g. contains BBL.BK strings)
-    # If Date is missing in row 0, drop rows with NaT in Date after conversion.
-    # This is safer than blindly dropping the first row.
-    df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-    df = df.dropna(subset=['Date']).reset_index(drop=True)
+    # Convert Date & remove invalid rows (fix junk header row)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df.dropna(subset=["Date"]).reset_index(drop=True)
 
-    # Ensure numeric columns exist
-    expected = ['Open', 'High', 'Low', 'Close', 'Volume']
-    for c in expected:
-        if c not in df.columns:
-            raise ValueError(f"Missing column in CSV: {c}")
+    # Sort by Date
+    df = df.sort_values("Date")
 
-    # Convert numeric columns to float (coerce errors -> NaN) then forward-fill
-    df[expected] = df[expected].apply(pd.to_numeric, errors='coerce')
-    df = df.sort_values('Date').reset_index(drop=True)
-    df[expected] = df[expected].fillna(method='ffill').fillna(method='bfill')
+    # Filter training period: 2019 → 2023
+    df_train = df[(df["Date"].dt.year >= 2019) & (df["Date"].dt.year <= 2023)]
+    print("Training period:", df_train["Date"].min().date(), "to", df_train["Date"].max().date())
+    print("Training rows:", len(df_train))
 
-    # Keep only needed columns (Date removed for model input)
-    df = df[['Date'] + expected]
+    # Ensure numeric columns
+    num_cols = ["Open", "High", "Low", "Close", "Volume"]
+    df_train[num_cols] = df_train[num_cols].apply(pd.to_numeric, errors="coerce")
+    df_train[num_cols] = df_train[num_cols].fillna(method="ffill").fillna(method="bfill")
 
-    print("Data range:", df['Date'].min().date(), "to", df['Date'].max().date())
-    print("Rows:", len(df))
-    return df
+    # Final cleaned data
+    df_train = df_train[["Date"] + num_cols]
+    return df_train
 
 # ==========================================================
-# 2. PREPROCESS
+# 2. PREPROCESS FOR LSTM
 # ==========================================================
 def preprocess(df):
-    print("Scaling OHLCV values...")
-    features = ['Open', 'High', 'Low', 'Close', 'Volume']
-    scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df[features].values)  # shape (N,5)
+    features = ["Open", "High", "Low", "Close", "Volume"]
 
-    # Save scaler (use joblib for sklearn objects)
+    print("Scaling OHLCV values...")
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(df[features].values)
+
+    # Save scaler
     joblib.dump(scaler, SCALER_NAME)
-    print("Scaler saved to", SCALER_NAME)
+    print("Scaler saved:", SCALER_NAME)
 
     X, y = [], []
+
     for i in range(SEQ_LEN, len(scaled)):
-        X.append(scaled[i-SEQ_LEN:i])   # sequence of shape (SEQ_LEN, 5)
-        y.append(scaled[i][3])          # next-day Close is column index 3
+        X.append(scaled[i-SEQ_LEN:i])  # 5-day window
+        y.append(scaled[i][3])         # next-day CLOSE price
 
     X = np.array(X, dtype=np.float32)
     y = np.array(y, dtype=np.float32).reshape(-1, 1)
 
-    print("X shape:", X.shape, "y shape:", y.shape)
+    print("X shape:", X.shape)
+    print("y shape:", y.shape)
     return X, y, scaler
 
 # ==========================================================
@@ -92,17 +92,19 @@ def build_model(input_shape):
     model = Sequential([
         LSTM(64, return_sequences=True, input_shape=input_shape),
         Dropout(0.2),
+
         LSTM(32, return_sequences=False),
         Dropout(0.2),
+
         Dense(16, activation="relu"),
-        Dense(1)  # predict next day close (scaled)
+        Dense(1)
     ])
     model.compile(optimizer="adam", loss="mse")
     model.summary()
     return model
 
 # ==========================================================
-# 4. TRAIN MODEL
+# 4. TRAIN MODEL (EPOCHS = 100)
 # ==========================================================
 def train_model(model, X, y):
     es = EarlyStopping(
@@ -113,10 +115,10 @@ def train_model(model, X, y):
 
     history = model.fit(
         X, y,
-        epochs=100,
+        epochs=100,          # 🔥 YOUR REQUEST: 100 EPOCHS
         batch_size=32,
-        shuffle=False,        # don't shuffle time-series sequences
-        validation_split=0.1, # small hold-out for validation
+        shuffle=False,       # IMPORTANT for time series
+        validation_split=0.1,
         callbacks=[es],
         verbose=1
     )
@@ -126,10 +128,9 @@ def train_model(model, X, y):
 # 5. PLOT LOSS
 # ==========================================================
 def plot_loss(history):
-    plt.figure(figsize=(8,4))
-    plt.plot(history.history["loss"], label="train")
-    if "val_loss" in history.history:
-        plt.plot(history.history["val_loss"], label="val")
+    plt.figure(figsize=(8, 4))
+    plt.plot(history.history["loss"], label="Train Loss")
+    plt.plot(history.history["val_loss"], label="Val Loss")
     plt.title("Training Loss")
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
@@ -144,8 +145,8 @@ def main():
     X, y, scaler = preprocess(df)
 
     model = build_model((X.shape[1], X.shape[2]))
-
     history = train_model(model, X, y)
+
     plot_loss(history)
 
     model.save(MODEL_NAME)
