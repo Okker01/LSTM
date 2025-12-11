@@ -1,0 +1,246 @@
+2) Create project folder & virtual env
+mkdir ~/bbl_lstm && cd ~/bbl_lstm
+python3 -m venv venv
+source venv/bin/activate
+
+3) Install required Python packages
+pip install --upgrade pip
+pip install numpy pandas scikit-learn matplotlib tensorflow
+
+
+(If you use GPU and conda, follow GPU install earlier; tensorflow will detect GPU if properly installed.)
+
+4) Put your CSV in the project folder
+
+Place your file named exactly:
+
+BBL_BK_OHLCV_2019-2025.csv
+
+
+Make sure it contains columns at least:
+
+Date, Open, High, Low, Close, Volume
+
+
+Quick check command:
+
+python - <<'PY'
+import pandas as pd
+df = pd.read_csv("BBL_BK_OHLCV_2019-2025.csv")
+print(df.columns.tolist())
+print(df.head(3))
+PY
+
+5) Use the training script (5-day seq -> next-day Close)
+
+Create train_lstm_bbl_5days.py in the folder with this exact content:
+
+# train_lstm_bbl_5days.py
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.callbacks import EarlyStopping
+import tensorflow as tf
+
+# GPU memory growth if GPU present
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+    print("GPU enabled")
+else:
+    print("No GPU detected; using CPU")
+
+CSV_FILE = "BBL_BK_OHLCV_2019-2025.csv"
+SEQ_LEN = 5
+MODEL_NAME = "lstm_bbl_5days.h5"
+SCALER_NAME = "bbl_scaler.npy"
+
+def load_data():
+    df = pd.read_csv(CSV_FILE)
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.sort_values("Date")
+    df = df[["Open", "High", "Low", "Close", "Volume"]]
+    df = df.fillna(method="ffill")
+    return df
+
+def preprocess(df):
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(df)
+    np.save(SCALER_NAME, {
+        "min_": scaler.min_,
+        "scale_": scaler.scale_,
+        "data_min_": scaler.data_min_,
+        "data_max_": scaler.data_max_,
+        "data_range_": scaler.data_range_
+    })
+    X, y = [], []
+    for i in range(SEQ_LEN, len(scaled)):
+        X.append(scaled[i-SEQ_LEN:i])
+        y.append(scaled[i][3])  # next-day close (scaled)
+    return np.array(X), np.array(y), scaler
+
+def build_model(input_shape):
+    model = Sequential([
+        LSTM(64, return_sequences=True, input_shape=input_shape),
+        Dropout(0.2),
+        LSTM(32),
+        Dropout(0.2),
+        Dense(16, activation="relu"),
+        Dense(1)
+    ])
+    model.compile(optimizer="adam", loss="mse")
+    model.summary()
+    return model
+
+def train_model(model, X, y):
+    es = EarlyStopping(monitor="loss", patience=10, restore_best_weights=True)
+    history = model.fit(X, y, epochs=50, batch_size=32, shuffle=True, callbacks=[es])
+    return history
+
+def plot_loss(history):
+    plt.figure(figsize=(8,4))
+    plt.plot(history.history["loss"], label="loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.show()
+
+def main():
+    df = load_data()
+    X, y, scaler = preprocess(df)
+    print("Shapes:", X.shape, y.shape)
+    model = build_model((X.shape[1], X.shape[2]))
+    history = train_model(model, X, y)
+    plot_loss(history)
+    model.save(MODEL_NAME)
+    print("Saved model:", MODEL_NAME)
+    print("Saved scaler:", SCALER_NAME)
+
+if __name__ == "__main__":
+    main()
+
+6) Run training
+
+Activate venv if not active:
+
+source venv/bin/activate
+python3 train_lstm_bbl_5days.py
+
+
+You’ll see model summary and training progress. Training will stop early if loss plateaus (EarlyStopping). When finished you’ll have:
+
+lstm_bbl_5days.h5 (model)
+
+bbl_scaler.npy (scaler metadata)
+
+7) Predict tomorrow & plot actual vs predicted (combined script)
+
+Create combined_predict_and_plot_bbl.py with this content:
+
+# combined_predict_and_plot_bbl.py
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from tensorflow.keras.models import load_model
+from sklearn.preprocessing import MinMaxScaler
+
+CSV_FILE = "BBL_BK_OHLCV_2019-2025.csv"
+MODEL_NAME = "lstm_bbl_5days.h5"
+SCALER_NAME = "bbl_scaler.npy"
+SEQ_LEN = 5
+
+def load_scaler():
+    d = np.load(SCALER_NAME, allow_pickle=True).item()
+    scaler = MinMaxScaler()
+    scaler.min_ = d["min_"]
+    scaler.scale_ = d["scale_"]
+    scaler.data_min_ = d["data_min_"]
+    scaler.data_max_ = d["data_max_"]
+    scaler.data_range_ = d["data_range_"]
+    return scaler
+
+def load_data():
+    df = pd.read_csv(CSV_FILE)
+    df["Date"] = pd.to_datetime(df["Date"])
+    df = df.sort_values("Date")
+    df_raw = df.copy()
+    df = df[["Open","High","Low","Close","Volume"]].fillna(method="ffill")
+    return df_raw, df
+
+def predict_tomorrow(model, scaler, df):
+    last = df.tail(SEQ_LEN).values
+    scaled_input = scaler.transform(last)
+    X = np.array([scaled_input])
+    scaled_pred = model.predict(X)[0][0]
+    inv = scaler.inverse_transform(np.array([[0,0,0,scaled_pred,0]]))[0][3]
+    return inv
+
+def generate_plot_preds(model, scaler, df_raw, df):
+    scaled = scaler.transform(df)
+    X, y = [], []
+    for i in range(SEQ_LEN, len(scaled)):
+        X.append(scaled[i-SEQ_LEN:i])
+        y.append(scaled[i][3])
+    X = np.array(X)
+    scaled_preds = model.predict(X).flatten()
+    inv_preds = [scaler.inverse_transform(np.array([[0,0,0,p,0]]))[0][3] for p in scaled_preds]
+    actual = df_raw["Close"].iloc[SEQ_LEN:].values
+    dates = df_raw["Date"].iloc[SEQ_LEN:].values
+    return dates, actual, inv_preds
+
+def plot_results(dates, actual, preds):
+    plt.figure(figsize=(12,6))
+    plt.plot(dates, actual, label="Actual Close")
+    plt.plot(dates, preds, label="Predicted Close", alpha=0.8)
+    plt.xlabel("Date"); plt.ylabel("Price (THB)")
+    plt.legend(); plt.grid(True); plt.show()
+
+def main():
+    scaler = load_scaler()
+    model = load_model(MODEL_NAME)
+    df_raw, df = load_data()
+    tom = predict_tomorrow(model, scaler, df)
+    print("Predicted next-day CLOSE:", round(tom, 4))
+    dates, actual, preds = generate_plot_preds(model, scaler, df_raw, df)
+    plot_results(dates, actual, preds)
+
+if __name__ == "__main__":
+    main()
+
+
+Run:
+
+python3 combined_predict_and_plot_bbl.py
+
+
+It prints predicted next-day Close and displays the Actual vs Predicted chart.
+
+8) Useful tips & debugging
+
+If column names don’t match, open CSV and ensure headers exactly Date,Open,High,Low,Close,Volume. You can adapt script column names if needed.
+
+If tensorflow fails import or GPU not used, check pip list and nvidia-smi (GPU).
+
+If model overfits, reduce LSTM size, add Dropout, or reduce epochs.
+
+To predict on the real next trading day: replace data refresh with fetching latest OHLCV (yfinance) then run the predict part.
+
+9) Quick checklist (copy-paste)
+# project setup
+mkdir ~/bbl_lstm && cd ~/bbl_lstm
+python3 -m venv venv
+source venv/bin/activate
+pip install numpy pandas scikit-learn matplotlib tensorflow
+
+# put CSV in this folder: BBL_BK_OHLCV_2019-2025.csv
+# create files train_lstm_bbl_5days.py and combined_predict_and_plot_bbl.py (copy above)
+
+# train
+python3 train_lstm_bbl_5days.py
+
+# predict + plot
+python3 combined_predict_and_plot_bbl.py
