@@ -30,12 +30,15 @@ SEQ_LEN = 5
 
 
 # ==========================================================
-# LOAD DATA
+# LOAD DATA (FILTER 2023–2024)
 # ==========================================================
 def load_data():
     df = pd.read_csv(CSV_FILE)
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.sort_values("Date")
+
+    # 🔥 TESTING PERIOD ONLY 2023–2024
+    df = df[(df["Date"] >= "2023-01-01") & (df["Date"] <= "2024-12-31")]
 
     df_raw = df.copy()
     df = df[["Open", "High", "Low", "Close", "Volume"]]
@@ -45,7 +48,7 @@ def load_data():
 
 
 # ==========================================================
-# PREDICT TOMORROW
+# PREDICT TOMORROW (using last 5 days from 2024)
 # ==========================================================
 def predict_tomorrow(model, scaler, df):
     last_5 = df.tail(SEQ_LEN).values
@@ -55,7 +58,6 @@ def predict_tomorrow(model, scaler, df):
 
     scaled_pred = model.predict(X_input)
 
-    # inverse transform only CLOSE price
     pred_close = scaler.inverse_transform(
         np.array([[0, 0, 0, scaled_pred[0][0], 0]])
     )[0][3]
@@ -64,18 +66,16 @@ def predict_tomorrow(model, scaler, df):
 
 
 # ==========================================================
-# MAKE FULL PREDICTIONS FOR PLOT
+# MAKE FULL PREDICTIONS FOR PLOT 2023–2024
 # ==========================================================
 def generate_plot_predictions(model, scaler, df, df_raw):
     scaled = scaler.transform(df)
 
-    X, y = [], []
+    X = []
     for i in range(SEQ_LEN, len(scaled)):
         X.append(scaled[i-SEQ_LEN:i])
-        y.append(scaled[i][3])
 
     X = np.array(X)
-    y = np.array(y)
 
     scaled_preds = model.predict(X)
 
@@ -96,10 +96,10 @@ def generate_plot_predictions(model, scaler, df, df_raw):
 # PLOT FUNCTION
 # ==========================================================
 def plot_predictions(dates, actual, preds):
-    plt.figure(figsize=(14,6))
+    plt.figure(figsize=(14, 6))
     plt.plot(dates, actual, label="Actual Close")
     plt.plot(dates, preds, label="Predicted Close", alpha=0.8)
-    plt.title("Actual vs Predicted Close Price (BBL)")
+    plt.title("Actual vs Predicted Close Price (BBL) - Test Period 2023–2024")
     plt.xlabel("Date")
     plt.ylabel("Price (THB)")
     plt.legend()
@@ -108,26 +108,24 @@ def plot_predictions(dates, actual, preds):
 
 
 # ==========================================================
-# MAIN SCRIPT
+# MAIN
 # ==========================================================
 def main():
-    # Load everything
     scaler = load_scaler()
     model = load_model(MODEL_NAME)
     df_raw, df = load_data()
 
-    # 1) Predict Tomorrow
+    # 1) Predict next-day close after 2024 last day
     tomorrow_pred = predict_tomorrow(model, scaler, df)
 
     print("\n=====================================")
-    print("📌 Predicted NEXT-DAY Close Price =", tomorrow_pred)
+    print("📌 Predicted NEXT-DAY Close (After 2024) =", tomorrow_pred)
     print("=====================================\n")
 
-    # 2) Generate full prediction plot
+    # 2) Plot predictions for 2023–2024 period
     dates, actual, preds = generate_plot_predictions(model, scaler, df, df_raw)
     plot_predictions(dates, actual, preds)
 
 
-# Run
 if __name__ == "__main__":
     main()
