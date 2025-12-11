@@ -10,12 +10,6 @@ import joblib
 import os
 
 # ==========================================================
-# FOLDER TO SAVE MODEL + SCALER
-# ==========================================================
-SAVE_FOLDER = "saved_models"
-os.makedirs(SAVE_FOLDER, exist_ok=True)
-
-# ==========================================================
 # GPU CHECK
 # ==========================================================
 gpus = tf.config.list_physical_devices('GPU')
@@ -23,71 +17,68 @@ if gpus:
     for gpu in gpus:
         try:
             tf.config.experimental.set_memory_growth(gpu, True)
-        except Exception:
+        except:
             pass
-    print("🟢 GPU detected and enabled")
+    print("🟢 GPU enabled")
 else:
-    print("⚠️ No GPU found — running on CPU")
+    print("⚠️ No GPU found")
 
 # ==========================================================
 # SETTINGS
 # ==========================================================
 CSV_FILE = "/mnt/data/BBL_BK_OHLCV_2019-2025.csv"
 SEQ_LEN = 5
-MODEL_NAME = "lstm_bbl_5days.h5"
-SCALER_NAME = "bbl_scaler.save"
+
+SAVE_DIR = "bbl_lstm"          # 🔥 save folder
+MODEL_NAME = f"{SAVE_DIR}/lstm_bbl_5days.h5"
+SCALER_NAME = f"{SAVE_DIR}/bbl_scaler.save"
+
+# create folder if not exists
+os.makedirs(SAVE_DIR, exist_ok=True)
 
 # ==========================================================
-# 1. LOAD & CLEAN DATA
+# 1. LOAD & CLEAN DATA (TRAIN 2019–2023)
 # ==========================================================
 def load_data():
-    print("Loading dataset:", CSV_FILE)
     df = pd.read_csv(CSV_FILE)
-
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
-    df = df.dropna(subset=["Date"]).reset_index(drop=True)
+    df = df.dropna(subset=["Date"])
     df = df.sort_values("Date")
 
     df_train = df[(df["Date"].dt.year >= 2019) & (df["Date"].dt.year <= 2023)]
-    print("Training period:", df_train["Date"].min().date(), "to", df_train["Date"].max().date())
-    print("Training rows:", len(df_train))
 
     num_cols = ["Open", "High", "Low", "Close", "Volume"]
     df_train[num_cols] = df_train[num_cols].apply(pd.to_numeric, errors="coerce")
-    df_train[num_cols] = df_train[num_cols].fillna(method="ffill").fillna(method="bfill")
+    df_train[num_cols] = df_train[num_cols].fillna(method="ffill")
 
     return df_train[["Date"] + num_cols]
 
 # ==========================================================
-# 2. PREPROCESS FOR LSTM
+# 2. PREPROCESS
 # ==========================================================
 def preprocess(df):
     features = ["Open", "High", "Low", "Close", "Volume"]
-
-    print("Scaling OHLCV values...")
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df[features].values)
+    scaled = scaler.fit_transform(df[features])
 
-    # Save scaler in folder
-    joblib.dump(scaler, os.path.join(SAVE_FOLDER, SCALER_NAME))
-    print("Scaler saved to:", os.path.join(SAVE_FOLDER, SCALER_NAME))
+    joblib.dump(scaler, SCALER_NAME)
+    print("Scaler saved:", SCALER_NAME)
 
     X, y = [], []
-
     for i in range(SEQ_LEN, len(scaled)):
         X.append(scaled[i-SEQ_LEN:i])
         y.append(scaled[i][3])
 
-    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32).reshape(-1, 1), scaler
+    return np.array(X), np.array(y), scaler
 
 # ==========================================================
-# 3. BUILD MODEL
+# 3. MODEL
 # ==========================================================
-def build_model(input_shape):
+def build_model(shape):
     model = Sequential([
-        LSTM(64, return_sequences=True, input_shape=input_shape),
+        LSTM(64, return_sequences=True, input_shape=shape),
         Dropout(0.2),
-        LSTM(32, return_sequences=False),
+        LSTM(32),
         Dropout(0.2),
         Dense(16, activation="relu"),
         Dense(1)
@@ -97,50 +88,28 @@ def build_model(input_shape):
     return model
 
 # ==========================================================
-# 4. TRAIN MODEL
-# ==========================================================
-def train_model(model, X, y):
-    es = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)
-
-    return model.fit(
-        X, y,
-        epochs=100,
-        batch_size=32,
-        shuffle=False,
-        validation_split=0.1,
-        callbacks=[es],
-        verbose=1
-    )
-
-# ==========================================================
-# 5. PLOT LOSS
-# ==========================================================
-def plot_loss(history):
-    plt.figure(figsize=(8, 4))
-    plt.plot(history.history["loss"], label="Train Loss")
-    plt.plot(history.history["val_loss"], label="Val Loss")
-    plt.title("Training Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.show()
-
-# ==========================================================
-# 6. MAIN
+# MAIN
 # ==========================================================
 def main():
     df = load_data()
-    X, y, scaler = preprocess(df)
+    X, y, _ = preprocess(df)
 
     model = build_model((X.shape[1], X.shape[2]))
-    history = train_model(model, X, y)
 
-    plot_loss(history)
+    es = EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True)
 
-    # Save model inside folder
-    model_path = os.path.join(SAVE_FOLDER, MODEL_NAME)
-    model.save(model_path)
-    print("\nModel saved to:", model_path)
+    history = model.fit(
+        X, y,
+        epochs=100,
+        batch_size=32,
+        validation_split=0.1,
+        shuffle=False,
+        callbacks=[es]
+    )
+
+    # Save model into folder
+    model.save(MODEL_NAME)
+    print("Model saved to:", MODEL_NAME)
 
 if __name__ == "__main__":
     main()
