@@ -39,6 +39,13 @@ def load_data():
     df["Date"] = pd.to_datetime(df["Date"])
     df = df.sort_values("Date")
 
+    # 3. Sort by Date
+    df = df.sort_values('Date')
+
+    # 4. Convert numeric columns to float
+    num_cols = ['Open', 'High', 'Low', 'Close', 'Volume']
+    df[num_cols] = df[num_cols].astype(float)
+
     # Select OHLCV features
     df = df[["Open", "High", "Low", "Close", "Volume"]]
 
